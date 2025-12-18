@@ -4,7 +4,20 @@ This is an imitation learning pipeline for training Diffusion Policies, a simpli
 
 ## Environment Setup
 
-Write Here
+The conda environment and everything is already set up on the lab computer so you can skip most of this section if you are able to activate the environment with `conda activate robodiff`. If you are setting this up for training on a new GPU server, you will need to set the environment up so clone the repository on the server and run these commands:
+
+`curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"`
+`bash Miniforge3-$9uname)-$(uname -m).sh`
+`export PATH="$HOME/miniforge3/bin:$PATH"`
+
+We use Miniforge to speed up the installation process for all the libraries. It should be installed after these commands and you can confirm that with `mamba --version`. Then you can setup the environment:
+
+`cd Environment`
+`mamba env create -f conda_environment_real.yaml`
+`source ~/miniforge3/etc/profile.d/conda.sh`
+`conda activate robodiff`
+
+To run training eventually, you will have to login to wandb. Make sure to create an account and use `wandb login ACCESS_CODE`. Replace ACCESS_CODE with your own. 
 
 ### Data Collection
 
