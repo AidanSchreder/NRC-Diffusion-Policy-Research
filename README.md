@@ -21,9 +21,10 @@ To run training eventually, you will have to login to wandb. Make sure to create
 
 ### Data Collection
 
-Write Here
+Whichever part of the pipeline you are working on, make sure to `cd` into the appropriate folder. There are two teleoperation modalities and each has it's own script. We primarily use the haptic device so I will focus on that but the VR script is very similar.
 
-* Write Steps Here
+* To collect data, run `python collect_haply.py -o Collected_Data/taskName_numOfEpisodes`. Once the robot is calibrated and in it's home position, press C to start an episode. The robot will start moving once you enable it with the haptic device. When you have completed you're task, return to the proximity of the start position and press S to save the episode. Repeat this for all your episodes.
+* Once you have collected your data, it should all show up under the Collected_Data folder. You can view the data by running `python read_zarr.py episodeNumber`, replacing episodeNumber with the one you want to view.
 
 ### Policy Training
 
