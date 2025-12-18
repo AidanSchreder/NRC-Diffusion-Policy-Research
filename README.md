@@ -28,24 +28,25 @@ Whichever part of the pipeline you are working on, make sure to `cd` into the ap
 
 ### Policy Training
 
-Write Here
+This is where the code starts to branch across in a bunch of different places. The current setup has all the main things configured as needed with comments on where to make chanegs specific to your data. I will show an example for the light_switch task of the typical changes you would make for each new dataset you collect.
 
-* Write Steps Here
+* Choose Dataset - in the `config/task/light_switch.yaml` make sure to set the `dataset_path` appropriately. If you are using a different action representation, change the `_target_` variable under `dataset`
+* Configure Training Setup - the transformer policy needs to be adapted to include flow-based conversion for RTC so start with UNet before move on to that. Make sure the `task` variable under `defaults` matches the name of your task.yaml file. This is also the file where you set training hyperparameters like action horizon, batch size, number of epochs, number of action steps, etc.
+
+Once you have configured all the variable appropriately, run this command to start training: `nohup python train.py --config-name=unet_workspace.yaml > train1.log 2>&1 &`
+* Note that the use of nohup allows the command to run even while logged out.
+* View the training metrics and graphs on wandb
 
 ### Inference
 
-Write Here
+Once you're training is done, assess the graphs to identify the best checkpoint. Then, use scp to move the ckpt file over to the lab computer and save it under `Inference/Checkpoints'. There are two options you have to run inference:
 
-* Write Steps Here
-  
-```
-code blocks for commands
-```
+* `inference.py` - The regular implementation of inference. Run it with `python inference.py -i Checkpoints/FILENAME -o Logs/LOGNAME`
+* `inference_RTC.py` - Runs the same way but implements Real-Time Chunking. See this **document** for a detailed explanation on how it works.
 
-## Other Notes
-
-Write Here
-
-```
-command to run if program contains helper info
-```
+To get the best results out of the policy, you will likely need to try out different values for these variables through trial and error:
+* **num_inference_steps** -
+* **n_action_steps** -
+* **steps_per_inference** -
+* **rtc_max_guidance** - 
+* **OUTPUT_GAIN** - sometimes the trained policy can output appropriate actions but they need to be scaled up slightly to actually accomplish the task consistently. 
