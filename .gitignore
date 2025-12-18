@@ -1,0 +1,6 @@
+*.ckpt
+# *.mp4
+
+*Inference/Logs/light_switch_1/videos
+*Inference/Logs/light_switch_2/videos
+*Data_Collection/Collected_Data/light_switch_50/videos
