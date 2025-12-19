@@ -45,9 +45,10 @@ Once you're training is done, assess the graphs to identify the best checkpoint.
 * `inference_RTC.py` - Runs the same way but implements Real-Time Chunking. See this **document** for a detailed explanation on how it works.
 
 To get the best results out of the policy, you will likely need to try out different values for these variables through trial and error:
-* **num_inference_steps** -
+* **num_inference_steps** - diffusion policies start with a noisy trajectory and iteratively remove noise, 1 step at a time. This variable controls how much you denoise the trajectory.
+  * The higher the value, the cleaner the trajectory but it also slows down inference, so you have to find a tradeoff that works well. 
 * **n_action_steps** - reliable portion of the action horizon. For inference.py, this dictates how many actions from the prediction we actually end up sending to the inference script (happens in the policy file).
 * **steps_per_inference** - determines how much of the action horizon you actually execute from every prediction (inference.py). This typically gets overwritten by RTC.
   * For example, if your horizon is set to 16 in training, the policy plans out a 16 step action trajectory. n_action_steps then truncates that to reliable actions (8-10), and steps_per_inference dictates how many we actually end up executing. All of this applies to inference.py because with RTC, we care about the whole horizon.
-* **rtc_max_guidance** - 
+* **rtc_max_guidance** - regulates the strength of soft guidance. If you notice that the robot is getting stuck on early parts of the trajectory, try lowering this. 
 * **OUTPUT_GAIN** - sometimes the trained policy can output appropriate actions but they need to be scaled up slightly to actually accomplish the task consistently. 
