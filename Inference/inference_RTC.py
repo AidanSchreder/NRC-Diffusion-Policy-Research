@@ -317,7 +317,7 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                             # First chunk: nothing old is being executed yet
                             real_delay_steps = 0
 
-                        curr_action_world = curr_raw_chunk # MOVE RELATIVE TRANSFORMATION HERE AFTER
+                        curr_action_world = curr_raw_chunk
 
                         if debug:
                             # Compare RTC vs naive prediction
@@ -342,7 +342,6 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                         # Drop first real_delay_steps actions (executed while policy was thinking)
                         this_chunk_world = curr_action_world[real_delay_steps:s_horizon]
                         # print(this_chunk_world)
-                        actions_to_queue = this_chunk_world.shape[0]
 
                         if debug:
                             print(
