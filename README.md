@@ -42,7 +42,7 @@ Once you have configured all the variable appropriately, run this command to sta
 Once you're training is done, assess the graphs to identify the best checkpoint. Then, use scp to move the ckpt file over to the lab computer and save it under `Inference/Checkpoints'. There are two options you have to run inference:
 
 * `inference.py` - The regular implementation of inference. Run it with `python inference.py -i Checkpoints/FILENAME -o Logs/LOGNAME`
-* `inference_RTC.py` - Runs the same way but implements Real-Time Chunking. See this **document** for a detailed explanation on how it works.
+* `inference_RTC.py` - Runs the same way but implements Real-Time Chunking. See this [**document**](https://drive.google.com/file/d/1ogTLieO2v125vSG6LcxzhsyTF9fo-DQ1/view?usp=sharing) for a detailed explanation on how it works.
 
 To get the best results out of the policy, you will likely need to try out different values for these variables through trial and error:
 * **num_inference_steps** - diffusion policies start with a noisy trajectory and iteratively remove noise, 1 step at a time. This variable controls how much you denoise the trajectory.
