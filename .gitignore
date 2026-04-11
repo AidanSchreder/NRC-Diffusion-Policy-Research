@@ -1,6 +1,17 @@
 *.ckpt
 # *.mp4
 
+*.log
+__pycache__/
+
 *Inference/Logs/light_switch_1/videos
 *Inference/Logs/light_switch_2/videos
 *Data_Collection/Collected_Data/light_switch_50/videos
+
+Data_Collection/Collected_Data/
+Data_Collection/visualization_outputs/
+Inference/Checkpoints/
+Inference/Logs/
+
+Training/data/
+Checkpoints/
