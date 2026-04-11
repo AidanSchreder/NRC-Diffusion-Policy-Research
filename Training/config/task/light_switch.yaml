@@ -1,7 +1,7 @@
 name: light_switch # <-------------------- SET TASK NAME HERE - use the same name in workspace.yaml file
 
 image_shape: [3, 256, 320]
-dataset_path: /home/dolam/NRC_Diffusion_Policy/Data_Collection/Collected_Data/light_switch_75/ #  <-------------------- SET DATASET PATH HERE
+dataset_path: /media/Data/demoaccount2/Fall_2025/NRC_Diffusion_Policy_2.0/Data_Collection/Collected_Data/wiping_50 #  <-------------------- SET DATASET PATH HERE
 
 shape_meta: &shape_meta
   # acceptable types: rgb, low_dim
@@ -29,7 +29,7 @@ env_runner:
   _target_: Training.env_runner.real_pusht_image_runner.RealPushTImageRunner
 
 dataset:
-  _target_: Training.dataset.relative_dataset.RelativeDataset # <-------------------- CHANGE DATASET CONVERSION CLASS HERE
+  _target_: Training.dataset.relative_dataset.GripperTestRelative # <-------------------- CHANGE DATASET CONVERSION CLASS HERE
   shape_meta: *shape_meta
   dataset_path: ${task.dataset_path}
   horizon: ${horizon}

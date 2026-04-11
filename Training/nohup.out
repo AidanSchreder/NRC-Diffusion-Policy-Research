@@ -1,0 +1,193 @@
+name: unet
+_target_: Training.workspace.default_workspace.TrainDiffusionUnetImageWorkspace
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+exp_name: ${task.name}
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+past_action_visible: false
+keypoint_visible_rate: 1.0
+obs_as_global_cond: true
+policy:
+  _target_: Training.policy.diffusion_unet_image_policy.DiffusionUnetImagePolicy
+  shape_meta: ${shape_meta}
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    num_train_timesteps: 100
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: true
+    set_alpha_to_one: true
+    steps_offset: 0
+    prediction_type: epsilon
+  obs_encoder:
+    _target_: Training.model.vision.multi_image_obs_encoder.MultiImageObsEncoder
+    shape_meta: ${shape_meta}
+    rgb_model:
+      _target_: Training.model.vision.model_getter.get_resnet
+      name: resnet18
+      weights: null
+    resize_shape:
+    - 256
+    - 320
+    crop_shape:
+    - 216
+    - 270
+    random_crop: true
+    use_group_norm: true
+    share_rgb_model: false
+    imagenet_norm: true
+  horizon: ${horizon}
+  n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
+  n_obs_steps: ${n_obs_steps}
+  num_inference_steps: 100
+  obs_as_global_cond: ${obs_as_global_cond}
+  diffusion_step_embed_dim: 128
+  down_dims:
+  - 512
+  - 1024
+  - 2048
+  kernel_size: 5
+  n_groups: 8
+  cond_predict_scale: true
+ema:
+  _target_: Training.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+dataloader:
+  batch_size: 32
+  num_workers: 8
+  shuffle: true
+  pin_memory: true
+  persistent_workers: true
+val_dataloader:
+  batch_size: 32
+  num_workers: 8
+  shuffle: false
+  pin_memory: true
+  persistent_workers: true
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 0.0001
+  betas:
+  - 0.95
+  - 0.999
+  eps: 1.0e-08
+  weight_decay: 1.0e-06
+training:
+  device: cuda:0
+  seed: 42
+  debug: false
+  resume: true
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  num_epochs: 50
+  gradient_accumulate_every: 1
+  use_ema: true
+  freeze_encoder: false
+  rollout_every: 5
+  checkpoint_every: 5
+  val_every: 1
+  sample_every: 5
+  max_train_steps: 500
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+logging:
+  project: NRC_Diffusion_Policy
+  resume: true
+  mode: online
+  name: ${task_name}_UNET_AH=${horizon}
+  tags:
+  - ${name}
+  - ${task_name}
+  - ${exp_name}
+  id: null
+  group: null
+checkpoint:
+  topk:
+    monitor_key: train_loss
+    mode: min
+    k: 5
+    format_str: epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt
+  save_last_ckpt: true
+  save_last_snapshot: false
+multi_run:
+  run_dir: Inference/Checkpoints/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  wandb_name_base: ${task_name}_UNET_AH=${horizon}
+task:
+  name: light_switch
+  image_shape:
+  - 3
+  - 256
+  - 320
+  dataset_path: /home/Data/demoaccount2/Fall_2025/NRC_Diffusion_Policy_2.0/Data_Collection/Collected_Data/lamp_50
+  shape_meta:
+    obs:
+      camera_0:
+        shape: ${task.image_shape}
+        type: rgb
+      camera_1:
+        shape: ${task.image_shape}
+        type: rgb
+      robot_eef_pose:
+        shape:
+        - 6
+        type: low_dim
+      robot_gripper_state:
+        shape:
+        - 1
+        type: low_dim
+      start_pose:
+        shape:
+        - 6
+        type: low_dim
+    action:
+      shape:
+      - 7
+      type: low_dim
+  env_runner:
+    _target_: Training.env_runner.real_pusht_image_runner.RealPushTImageRunner
+  dataset:
+    _target_: Training.dataset.relative_dataset.GripperTestRelative
+    shape_meta:
+      obs:
+        camera_0:
+          shape: ${task.image_shape}
+          type: rgb
+        camera_1:
+          shape: ${task.image_shape}
+          type: rgb
+        robot_eef_pose:
+          shape:
+          - 6
+          type: low_dim
+        robot_gripper_state:
+          shape:
+          - 1
+          type: low_dim
+        start_pose:
+          shape:
+          - 6
+          type: low_dim
+      action:
+        shape:
+        - 7
+        type: low_dim
+    dataset_path: ${task.dataset_path}
+    horizon: ${horizon}
+    pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
+    pad_after: ${eval:'${n_action_steps}-1'}
+    n_obs_steps: ${dataset_obs_steps}
+    n_latency_steps: ${n_latency_steps}
+    use_cache: true
+    seed: 42
+    val_ratio: 0.05
+    max_train_episodes: null
+    delta_action: false

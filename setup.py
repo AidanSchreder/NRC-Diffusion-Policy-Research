@@ -1,6 +1,6 @@
 from setuptools import setup, find_packages
 
 setup(
-  name = 'teleop_controls',
+  name = 'Data_Collection',
   packages = find_packages(),
 )

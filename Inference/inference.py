@@ -44,6 +44,9 @@ torch.backends.cudnn.benchmark = False
 j_init = np.array([256.97,-61.94,133.80,109.75,-76.24,-4.66]) / 180 * np.pi
 # j_init = np.array([262.85,-102.50,128.16,246.68,-89.5,-10.81]) / 180 * np.pi
 
+#new wiping experiment
+j_init = np.array([282.44,-73.93,86.34,258.27,-89.28,8.64]) / 180 * np.pi
+
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 @click.command()
@@ -101,8 +104,8 @@ def main(input, output, robot_ip, match_dataset, match_episode,
     policy.eval().to(device)
 
     # set inference params
-    policy.num_inference_steps = 24 # DDIM inference iterations
-    policy.n_action_steps = policy.horizon - policy.n_obs_steps + 1
+    policy.num_inference_steps = 75 # DDIM inference iterations
+    policy.n_action_steps = policy.horizon - policy.n_obs_steps + 5
     # policy.n_action_steps = 6
 
     # setup experiment

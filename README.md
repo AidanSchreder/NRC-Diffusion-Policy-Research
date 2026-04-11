@@ -52,3 +52,9 @@ To get the best results out of the policy, you will likely need to try out diffe
   * For example, if your horizon is set to 16 in training, the policy plans out a 16 step action trajectory. n_action_steps then truncates that to reliable actions (8-10), and steps_per_inference dictates how many we actually end up executing. All of this applies to inference.py because with RTC, we care about the whole horizon.
 * **rtc_max_guidance** - regulates the strength of soft guidance. If you notice that the robot is getting stuck on early parts of the trajectory, try lowering this. 
 * **OUTPUT_GAIN** - sometimes the trained policy can output appropriate actions but they need to be scaled up slightly to actually accomplish the task consistently. 
+
+# TRAINING HYPERPARAMETERS
+horizon: 16 (to balance reactive control with capability to plan ahead)
+n_obs_steps: 2 (number of timesteps taken from the observation space to ensure sufficient historical context for accurate predictions)
+n_action_steps: 8 (number of actions exectued ?)
+n_latency_steps: 0

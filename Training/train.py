@@ -1,7 +1,13 @@
 """
 Usage:
 Training:
-python train.py --config-name=train_diffusion_lowdim_workspace
+nohup python train.py --config-name=unet_workspace_test.yaml > train1.log 2>&1 &
+
+nohup python train.py --config-name=transformer_workspace.yaml > train1.log 2>&1 &
+
+to check training status (can also check on wandb):
+tail -f train1.log 
+
 """
 
 import sys

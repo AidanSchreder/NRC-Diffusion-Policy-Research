@@ -1,4 +1,7 @@
 from typing import Optional
+from collections import deque
+import logging
+import threading
 import pathlib
 import numpy as np
 import time
@@ -19,6 +22,9 @@ from Training.common.cv2_util import (
     get_image_transform, optimal_row_cols)
 
 from Data_Collection.Haptic_Device_Setup import robotiq_gripper
+from pathlib import Path
+from Training.real_world.mae_sdk_sensureal.mae_fts_sdk.src import mae_fts_sdk as mae
+from Training.real_world.mae_sdk_sensureal.mae_sdk.src.mae_sdk import log_utils
 
 DEFAULT_OBS_KEY_MAP = {
     # robot
@@ -30,6 +36,58 @@ DEFAULT_OBS_KEY_MAP = {
     'step_idx': 'step_idx',
     'timestamp': 'timestamp'
 }
+
+
+class ForceTorqueSensor:
+    def __init__(self, fts_ip="192.168.1.11", fts_port=10547, log_force=False):
+        self.AVAILABLE_FTS_COMMANDS = {str(key): key for key in mae.FTS_COMMAND_RESPONSE.keys()}
+        self.logger = log_utils.get_logger(f"{Path(__file__).stem}", log_level=logging.WARNING)
+        self.communication_interface = mae.UdpCommunication(
+            ip_address=fts_ip,
+            port=fts_port,
+            timeout_sec=1,
+            log_level=logging.WARNING,
+        )
+        self.log_force = log_force
+        self.communication_interface.connect()
+        time.sleep(1)
+        self.send_command("FtsCommand.TRANSDUCER_SET")
+        time.sleep(1)
+        self.send_command("FtsCommand.BIAS_SET")
+        time.sleep(1)
+        self.send_command("FtsCommand.SETTINGS_SAVE")
+        time.sleep(1)
+
+    def send_command(self, new_command):
+        command = self.AVAILABLE_FTS_COMMANDS[new_command]
+        self.communication_interface.send_request(command)
+        if self.log_force:
+            print(f"Sent: {command}.")
+        elif new_command != "FtsCommand.STREAM_FT_START":
+            print(f"Sent: {command}.")
+        response_type = mae.FTS_COMMAND_RESPONSE[command]
+
+        if response_type is not None:
+            byte_stream = self.communication_interface.waits_response_bytes()
+            if byte_stream is None:
+                self.logger.error("No Response. Timed-out.")
+
+            response = response_type(byte_stream)
+            if self.log_force:
+                print(f"Received: {response}.")
+
+            return response.ft_sample
+
+    def stop(self):
+        self.communication_interface.disconnect()
+
+
+def _rodrigues_rotate(vec, axis, angle):
+    return (
+        (1 - math.cos(angle)) * np.dot(vec, axis) * axis
+        + vec * math.cos(angle)
+        + np.cross(axis, vec) * math.sin(angle)
+    )
 
 class RealEnv:
     def __init__(self, 
@@ -52,6 +110,10 @@ class RealEnv:
             tcp_offset=0,
             init_joints=True,
             j_init=None,
+            # force-torque sensor
+            enable_force_torque=False,
+            fts_ip="192.168.1.11",
+            fts_port=10547,
             # video capture params
             video_capture_fps=15,
             video_capture_resolution=(640,480),
@@ -219,7 +281,22 @@ class RealEnv:
         time.sleep(1)
         # ---------------------------------------------------------------------------------
 
+        self.enable_force_torque = enable_force_torque
+        self.ft_sensor = None
+        self.last_fts_info = np.zeros((6,), dtype=np.float32)
+        self.ft_buffer = deque(maxlen=max(max_obs_buffer_size * 4, n_obs_steps * 8, 64))
+        self.ft_timestamp_buffer = deque(maxlen=max(max_obs_buffer_size * 4, n_obs_steps * 8, 64))
+        self.ft_lock = threading.Lock()
+        self.last_fts_sample_time = None
+        if self.enable_force_torque:
+            self.ft_sensor = ForceTorqueSensor(
+                fts_ip=fts_ip,
+                fts_port=fts_port,
+                log_force=False
+            )
+
         self.start_pose = None
+        self.has_shutdown = False
     
     # ======== start-stop API =============
     @property
@@ -240,6 +317,10 @@ class RealEnv:
             self.multi_cam_vis.stop(wait=False)
         self.robot.stop(wait=False)
         self.realsense.stop(wait=False)
+        self.has_shutdown = True
+        if self.ft_sensor is not None:
+            self.ft_sensor.stop()
+            self.ft_sensor = None
         if wait:
             self.stop_wait()
 
@@ -331,9 +412,35 @@ class RealEnv:
         robot_obs["robot_gripper_state"] = gripper_arr
         robot_obs_raw["robot_gripper_state"] = gripper_arr
 
-        start_pose_arr = np.full((num_samples, 6), self.start_pose, dtype=np.float32)
+        current_start_pose = self.start_pose
+        if current_start_pose is None:
+            current_start_pose = np.asarray(
+                robot_obs_raw["robot_eef_pose"][this_idxs[-1]],
+                dtype=np.float32
+            )
+        start_pose_arr = np.broadcast_to(
+            np.asarray(current_start_pose, dtype=np.float32),
+            (num_samples, 6)
+        ).copy()
         robot_obs['start_pose'] = start_pose_arr
         robot_obs_raw['start_pose'] = start_pose_arr
+
+        if self.ft_sensor is not None:
+            try:
+                sample_timestamp = float(robot_timestamps[this_idxs[-1]])
+                if (
+                    self.last_fts_sample_time is None
+                    or sample_timestamp > (self.last_fts_sample_time + (0.5 / self.frequency))
+                ):
+                    self.get_fts_observation(
+                        tcp_pose=robot_obs["robot_eef_pose"][-1],
+                        timestamp=sample_timestamp,
+                    )
+            except Exception:
+                pass
+
+            robot_obs_raw['fts_info'] = self._align_fts_samples(robot_timestamps)
+            robot_obs['fts_info'] = robot_obs_raw['fts_info'][this_idxs]
 
         # accumulate obs
         if self.obs_accumulator is not None:
@@ -372,8 +479,11 @@ class RealEnv:
 
         # schedule waypoints
         for i in range(len(new_actions)):
+            pose = new_actions[i]
+            if len(pose) == 6:
+                pose = np.append(pose, 1.0)  # pad dummy gripper value
             self.robot.schedule_waypoint(
-                pose=new_actions[i],
+                pose=pose,
                 target_time=new_timestamps[i]
             )
         
@@ -391,6 +501,74 @@ class RealEnv:
     
     def get_robot_state(self):
         return self.robot.get_state()
+
+    def _push_fts_sample(self, fts_info: np.ndarray, timestamp: float) -> None:
+        fts_arr = np.asarray(fts_info, dtype=np.float32).reshape(6)
+        self.last_fts_info = fts_arr
+        self.ft_buffer.append(fts_arr.copy())
+        self.last_fts_sample_time = float(timestamp)
+        self.ft_timestamp_buffer.append(self.last_fts_sample_time)
+
+    def _align_fts_samples(self, target_timestamps: np.ndarray) -> np.ndarray:
+        target_timestamps = np.asarray(target_timestamps, dtype=np.float64).reshape(-1)
+        if len(target_timestamps) == 0:
+            return np.zeros((0, 6), dtype=np.float32)
+
+        with self.ft_lock:
+            if len(self.ft_buffer) == 0:
+                return np.broadcast_to(self.last_fts_info, (len(target_timestamps), 6)).astype(np.float32).copy()
+            ft_timestamps = np.asarray(self.ft_timestamp_buffer, dtype=np.float64)
+            ft_values = np.asarray(self.ft_buffer, dtype=np.float32)
+        aligned = np.empty((len(target_timestamps), 6), dtype=np.float32)
+        for i, timestamp in enumerate(target_timestamps):
+            idx = np.searchsorted(ft_timestamps, timestamp, side='right') - 1
+            if idx < 0:
+                idx = 0
+            aligned[i] = ft_values[idx]
+        return aligned
+
+    def get_fts_observation(self, tcp_pose: Optional[np.ndarray]=None,
+                            timestamp: Optional[float]=None) -> np.ndarray:
+        if self.ft_sensor is None:
+            return self.last_fts_info.copy()
+
+        if tcp_pose is None:
+            tcp_pose = np.asarray(self.get_robot_state()["ActualTCPPose"], dtype=np.float32)
+
+        with self.ft_lock:
+            ft_vec_raw = np.asarray(
+                self.ft_sensor.send_command("FtsCommand.STREAM_FT_START"),
+                dtype=np.float32
+            ).reshape(-1)
+            if ft_vec_raw.shape[0] < 6:
+                raise ValueError(f"Expected 6D FT sample, got shape {ft_vec_raw.shape}")
+
+            force_vec_raw = ft_vec_raw[:3]
+            fx, fy, fz = force_vec_raw
+            force_vec_tcp_raw = np.array([fy, -fx, fz], dtype=np.float32)
+            torque_vec = ft_vec_raw[3:6].astype(np.float32)
+
+            eef_rot_vec = np.asarray(tcp_pose[3:6], dtype=np.float32)
+            eef_rot_mag = float(np.linalg.norm(eef_rot_vec))
+            if eef_rot_mag < 1e-8:
+                eef_rot_matrix = np.eye(3, dtype=np.float32)
+            else:
+                eef_rot_axis = eef_rot_vec / eef_rot_mag
+                x_axis = np.array([1, 0, 0], dtype=np.float32)
+                y_axis = np.array([0, 1, 0], dtype=np.float32)
+                z_axis = np.array([0, 0, 1], dtype=np.float32)
+                eef_x_axis = _rodrigues_rotate(x_axis, eef_rot_axis, eef_rot_mag)
+                eef_y_axis = _rodrigues_rotate(y_axis, eef_rot_axis, eef_rot_mag)
+                eef_z_axis = _rodrigues_rotate(z_axis, eef_rot_axis, eef_rot_mag)
+                eef_rot_matrix = np.column_stack([eef_x_axis, eef_y_axis, eef_z_axis]).astype(np.float32)
+
+            force_vec_tcp = eef_rot_matrix @ force_vec_tcp_raw
+            fx_tcp, fy_tcp, fz_tcp = force_vec_tcp
+            force_vec = np.array([-fy_tcp, fx_tcp, fz_tcp], dtype=np.float32)
+            fts_info = np.concatenate((force_vec, torque_vec), axis=0).astype(np.float32)
+            sample_timestamp = time.time() if timestamp is None else float(timestamp)
+            self._push_fts_sample(fts_info, sample_timestamp)
+            return fts_info
     
     # recording API
     def start_episode(self, start_time=None):
@@ -415,6 +593,11 @@ class RealEnv:
         self.start_time = start_time
 
         assert self.is_ready
+        if self.start_pose is None:
+            self.start_pose = np.asarray(
+                self.robot.get_state()["ActualTCPPose"],
+                dtype=np.float32
+            )
 
         # prepare recording stuff
         episode_id = self.replay_buffer.n_episodes
@@ -493,6 +676,7 @@ class RealEnv:
             self.start_pose = None
 
     def drop_episode(self):
+        print(f"Before drop: {self.replay_buffer.n_episodes}")
         self.end_episode()
         self.replay_buffer.drop_episode()
         episode_id = self.replay_buffer.n_episodes
@@ -500,6 +684,7 @@ class RealEnv:
         if this_video_dir.exists():
             shutil.rmtree(str(this_video_dir))
         print(f'Episode {episode_id} dropped!')
+        print(f"After drop: {self.replay_buffer.n_episodes}")
 
     def send_gripper_command(self, gripper_value, speed=70, force=50):
         self.gripper.move(gripper_value, speed, force)

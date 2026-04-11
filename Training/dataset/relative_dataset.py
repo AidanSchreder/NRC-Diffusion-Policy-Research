@@ -44,7 +44,7 @@ class GripperTestRelative(BaseImageDataset):
             delta_action=False,
         ):
         assert os.path.isdir(dataset_path)
-        
+        print(f"USING DATASET CLASS: {self.__class__.__name__}")
         replay_buffer = None
         if use_cache:
             # fingerprint shape_meta
@@ -162,18 +162,27 @@ class GripperTestRelative(BaseImageDataset):
             )
         val_set.val_mask = ~self.val_mask
         return val_set
-
+    
     def get_normalizer(self, **kwargs) -> LinearNormalizer:
         normalizer = LinearNormalizer()
 
-        # action
+        """
+        WITH GRIPPER: 
+
         normalizer['action'] = SingleFieldLinearNormalizer.create_fit(
             self.replay_buffer['action'])
-        
+        """
+
+        normalizer['action'] = SingleFieldLinearNormalizer.create_fit(
+            self.replay_buffer['action'][:, :6])
+
         # obs
         for key in self.lowdim_keys:
-            normalizer[key] = SingleFieldLinearNormalizer.create_fit(
-              self.replay_buffer[key])
+            if key == 'progress':
+                normalizer[key] = SingleFieldLinearNormalizer.create_identity()
+            else:
+                normalizer[key] = SingleFieldLinearNormalizer.create_fit(
+                    self.replay_buffer[key])
                 
         # image
         for key in self.rgb_keys:
@@ -219,13 +228,18 @@ class GripperTestRelative(BaseImageDataset):
             start_pose
         )
 
-        rel_action =  absolute_to_relative_action(
-            data['action'][:, :6],
-            start_pose
-        )
+        rel_action =  absolute_to_relative_action(data['action'][:, :6], start_pose)
+        action = rel_action
 
+
+        """
+        WITH GRIPPER:
+        
+        rel_action = absolute_to_relative_action(data['action'][:, :6], start_pose)
         action_gripper = data['action'][:, -1:]
         action = np.concatenate([rel_action, action_gripper], axis=-1)
+        
+        """
 
         # Relative Action Changes ------------------------------------------------------
         
@@ -267,6 +281,10 @@ def _get_replay_buffer(dataset_path, shape_meta, store):
             lowdim_shapes[key] = tuple(shape)
             if 'pose' in key:
                 assert tuple(shape) in [(2,),(6,), (7,)]
+            
+            #FTS key
+            if key == 'fts_info':
+                assert tuple(shape) == (6,)
     
     action_shape = tuple(shape_meta['action']['shape'])
     assert action_shape in [(2,),(6,), (7,)]

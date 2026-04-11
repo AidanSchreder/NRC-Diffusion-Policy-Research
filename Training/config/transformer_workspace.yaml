@@ -11,7 +11,7 @@ exp_name: ${task.name}
 
 # TRAINING HYPERPARAMETERS
 horizon: 16
-batch-size: 64
+batch-size: 32
 n_obs_steps: 2
 n_action_steps: 8
 n_latency_steps: 0
@@ -97,7 +97,7 @@ training:
   lr_scheduler: cosine
   # Transformer needs LR warmup
   lr_warmup_steps: 500
-  num_epochs: 600
+  num_epochs: 100
   gradient_accumulate_every: 1
   # EMA destroys performance when used with BatchNorm
   # replace BatchNorm with GroupNorm.
@@ -125,22 +125,22 @@ logging:
 
 checkpoint:
   topk:
-    monitor_key: train_loss
+    monitor_key: val_loss
     mode: min
     k: 5
-    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt'
+    format_str: 'epoch={epoch:04d}-val_loss={val_loss:.3f}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
 
 multi_run:
-  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  run_dir: Inference/Checkpoints/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
   wandb_name_base: ${task_name}_TRANSFORMER_AH=${horizon}
 
 hydra:
   job:
     override_dirname: ${name}
   run:
-    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    dir: Inference/Checkpoints/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
   sweep:
-    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    dir: Inference/Checkpoints/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
     subdir: ${hydra.job.num}

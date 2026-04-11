@@ -1,6 +1,14 @@
 """
 Usage:
-python inference.py -i /home/demoaccount/Data/demoaccount2/Fall_2025/NRC_Diffusion_Policy/Inference/Checkpoints/FILENAME -o /home/demoaccount/Data/demoaccount2/Fall_2025/NRC_Diffusion_Policy/Inference/Logs/LOGNAME
+
+python inference_RTC.py -i /home/demoaccount/Data/demoaccount2/Fall_2025/NRC_Diffusion_Policy_2.0/Inference/Checkpoints/press_epoch=0035-val_loss=0.013.ckpt -o /home/demoaccount/Data/demoaccount2/Fall_2025/NRC_Diffusion_Policy_2.0/Inference/Logs/press
+
+DIVERSE SPLICED (25)
+python inference_RTC.py -i /home/demoaccount/Data/demoaccount2/Fall_2025/NRC_Diffusion_Policy_2.0/Inference/Checkpoints/diverse_splice_epoch=0045-val_loss=0.020.ckpt -o /home/demoaccount/Data/demoaccount2/Fall_2025/NRC_Diffusion_Policy_2.0/Inference/Logs/wiping_diverse_spliced
+
+DIVERSE 100 (IMAGE BKG)
+python inference_RTC.py -i /home/demoaccount/Data/demoaccount2/Fall_2025/NRC_Diffusion_Policy_2.0/Inference/Checkpoints/diverse_epoch=0045-val_loss=0.021.ckpt -o /home/demoaccount/Data/demoaccount2/Fall_2025/NRC_Diffusion_Policy_2.0/Inference/Logs/wiping_diverse_1
+
 """
 
 # %%
@@ -32,8 +40,22 @@ from Training.common.pose_repr_util import relative_to_absolute_action, absolute
 from collections import deque
 
 # Starting Robot Position
-j_init = np.array([256.97,-61.94,133.80,109.75,-76.24,-4.66]) / 180 * np.pi
-# j_init = np.array([262.85,-102.50,128.16,246.68,-89.5,-10.81]) / 180 * np.pi
+
+#lamp task:
+#j_init = np.array([256.97,-61.94,133.80,109.75,-76.24,-4.66]) / 180 * np.pi
+#wiping task:
+# j_init = np.array([262.85,-87.14,111.61,246.68,-89.5,-10.81]) / 180 * np.pi
+
+#j_init = np.array([274.40,-61.84,73.29,260.70,-89.28,0.79]) / 180 * np.pi
+
+#new wiping experiment
+#j_init = np.array([282.44,-73.93,86.34,258.27,-89.28,8.64]) / 180 * np.pi
+
+#ceneter
+#j_init = np.array([286.23,-79.18,92.93,256.84,-89.22,12.43]) / 180 * np.pi
+j_init = np.array([282.44,-73.93,86.34,258.27,-89.28,8.64]) / 180 * np.pi
+#simplifeid wiping
+#j_init = np.array([284.78,-72.73,101.10,243.87,-89.68,10.07]) / 180 * np.pi
 
 class LatencyTracker:
     """Tracks recent latencies (seconds) and provides max/percentiles."""
@@ -85,7 +107,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 @click.option('--vis_camera_idx', default=0, type=int, help="Which RealSense camera to visualize.")
 @click.option('--init_joints', '-j', is_flag=True, default=True, help="Whether to initialize robot joint configuration in the beginning.")
 @click.option('--steps_per_inference', '-si', default=6, type=int, help="Action horizon for inference.")
-@click.option('--max_duration', '-md', default=60, help='Max duration for each epoch in seconds.')
+@click.option('--max_duration', '-md', default=45, help='Max duration for each epoch in seconds.')
 @click.option('--frequency', '-f', default=10, type=float, help="Control frequency in Hz.")
 @click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving SapceMouse command to executing on Robot in Sec.")
 def main(input, output, robot_ip, match_dataset, match_episode,
@@ -131,9 +153,10 @@ def main(input, output, robot_ip, match_dataset, match_episode,
     policy.eval().to(device)
 
     # set inference params
-    policy.num_inference_steps = 30 # DDIM inference iterations
+    #policy.num_inference_steps = 30 # DDIM inference iterations
+    policy.num_inference_steps = 30
     policy.n_action_steps = 10
-    OUTPUT_GAIN = 1.01 # Scaling factor for policy output actions
+    OUTPUT_GAIN = 1.0 # Scaling factor for policy output actions
 
     # setup experiment
     dt = 1/frequency
@@ -151,7 +174,8 @@ def main(input, output, robot_ip, match_dataset, match_episode,
     prev_raw_chunk = None
     chunk_idx = 0
     rtc_schedule = "exp"
-    rtc_max_guidance = 10.0
+    #rtc_max_guidance = 10.0
+    rtc_max_guidance = 5
     debug = True
 
     with SharedMemoryManager() as shm_manager, \
@@ -309,7 +333,6 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                         # Measure real latency and convert to step-based delay
                         inference_time = time.time() - infer_start  # seconds
                         latency_tracker.add(inference_time)
-
 
                         real_delay_steps = int(np.ceil(inference_time / time_per_step))
                         real_delay_steps = max(0, min(real_delay_steps, s_horizon))

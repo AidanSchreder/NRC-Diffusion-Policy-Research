@@ -1,4 +1,11 @@
-# python collect_haply.py -o /home/demoaccount/Data/demoaccount2/Fall_2025/NRC_Diffusion_Policy/Data_Collection/Collected_Data/taskName_numOfEpisodes
+# python collect_haptic.py -o /home/demoaccount/Data/demoaccount2/Fall_2025/NRC_Diffusion_Policy_2.0/Data_Collection/Collected_Data/press_2
+
+"""
+check camera connection:
+realsense-viewer
+
+"""
+
 
 import time
 import click
@@ -15,8 +22,30 @@ from Training.real_world.keystroke_counter import (
 )
 
 # Starting Robot Position
-j_init = np.array([256.97,-61.94,133.80,109.75,-76.24,-4.66]) / 180 * np.pi
-# j_init = np.array([262.85,-87.14,111.61,246.68,-89.5,-10.81]) / 180 * np.pi
+
+#lamp task
+#j_init = np.array([256.97,-61.94,133.80,109.75,-76.24,-4.66]) / 180 * np.pi
+
+#wiping task
+#j_init = np.array([262.85,-87.14,111.61,246.68,-89.5,-10.81]) / 180 * np.pi
+
+#press
+j_init = np.array([268.77,-76.17,93.10,255.32,-89.55,-5.22]) / 180 * np.pi
+
+
+
+#new wiping experiment
+#j_init = np.array([282.44,-73.93,86.34,258.27,-89.28,8.64]) / 180 * np.pi
+
+
+
+
+
+#ceneter
+#j_init = np.array([286.23,-79.18,92.93,256.84,-89.22,12.43]) / 180 * np.pi
+
+#simplifeid wiping
+#j_init = np.array([284.78,-72.73,101.10,243.87,-89.68,10.07]) / 180 * np.pi
 
 @click.command()
 @click.option('--output', '-o', default="/home/demoaccount/Data/demoaccount2/Fall_2025/NRC_Diffusion_Policy/Data_Collection/Collected_Data/temp_location", help="Directory to save demonstration dataset.")
@@ -25,8 +54,12 @@ j_init = np.array([256.97,-61.94,133.80,109.75,-76.24,-4.66]) / 180 * np.pi
 @click.option('--init_joints', '-j', is_flag=True, default=True, help="Initialize robot joint configuration at start.")
 @click.option('--frequency', '-f', default=10, type=float, help="Control frequency in Hz.")
 @click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving command and execution (s).")
+@click.option('--fts_ip', default="192.168.1.11", help="Force-torque sensor IP address.")
+@click.option('--fts_port', default=10547, type=int, help="Force-torque sensor UDP port.")
+@click.option('--force_feedback/--no-force_feedback', default=True, help="Enable Haply force feedback using live FTS data.")
 
-def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_latency):
+def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_latency,
+         fts_ip, fts_port, force_feedback):
     dt = 1.0 / frequency
 
     with SharedMemoryManager() as shm_manager: 
@@ -38,6 +71,9 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
                 frequency=frequency,
                 init_joints=init_joints,
                 j_init=j_init,
+                enable_force_torque=True,
+                fts_ip=fts_ip,
+                fts_port=fts_port,
                 enable_multi_cam_vis=True,
                 record_raw_video=True,
                 thread_per_video=3,
@@ -45,7 +81,11 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
                 shm_manager=shm_manager
             ) as env:
 
-            viz = HapticVisualizer(display_plot=False)
+            viz = HapticVisualizer(
+                display_plot=False,
+                haptic_feedback=force_feedback,
+                force_reader=env,
+            )
             cv2.setNumThreads(1)
             env.realsense.set_exposure(exposure=120, gain=0)
             env.realsense.set_white_balance(white_balance=5900)

@@ -10,7 +10,8 @@ import sys
 from Data_Collection.Haptic_Device_Setup.teleop_controls.haply_reader.reader import HapticReader
 
 class HapticVisualizer:
-    def __init__(self, display_plot=True, gripper_open=1.0, gripper_closed=0.0, gripper_steps=5, haptic_feedback=False, force_reader=None):
+    def __init__(self, display_plot=True, gripper_open=1.0, gripper_closed=0.0,
+                 gripper_steps=5, haptic_feedback=False, force_reader=None):
         # State
         self.running = True
         self.calibrated = False
@@ -56,7 +57,10 @@ class HapticVisualizer:
         listener.start()
 
         # Haply reader + update thread
-        self.reader = HapticReader()
+        self.reader = HapticReader(
+            haptic_feedback=haptic_feedback,
+            force_reader=force_reader
+        )
         threading.Thread(target=self._update_loop, daemon=True).start()
 
         # Plot
@@ -101,11 +105,12 @@ class HapticVisualizer:
                 self.active = not self.active
             self.prev_button_a = a_pressed
 
+
             # Gripper toggle (B) — rising edge
             b_pressed = bool(self.buttons.get('b', False))
             if b_pressed and not self.prev_button_b:
                 # flip target between open and closed
-                self.gripper_target = self.gripper_closed if self.gripper_target == self.gripper_open else self.gripper_open
+                self.gripper_target = self.gripper_open #if self.gripper_target == self.gripper_open else self.gripper_open
                 self.gripper_counter = self.gripper_steps
             self.prev_button_b = b_pressed
 
@@ -127,6 +132,53 @@ class HapticVisualizer:
             #     self.gripper_counter -= 1
 
             time.sleep(0.05)
+    
+    """
+    def _update_loop(self):
+        while self.running:
+            poses, buttons = self.reader.get_device_state()
+            self.buttons = buttons or {}
+
+            # Active toggle (A) — rising edge
+            self.active = True
+            #a_pressed = bool(self.buttons.get('a', False))
+            #if a_pressed and not self.prev_button_a:
+            #    self.active = not self.active
+            #self.prev_button_a = a_pressed
+
+            # Gripper toggle (B) — rising edge
+            #b_pressed = bool(self.buttons.get('b', False))
+
+            self.gripper_target = self.gripper_closed
+            
+            #if b_pressed and not self.prev_button_b:
+                # flip target between open and closed
+            #    self.gripper_target = self.gripper_closed if self.gripper_target == self.gripper_open else self.gripper_open
+            #    self.gripper_counter = self.gripper_steps
+            #self.prev_button_b = b_pressed
+
+            # Pose/orient update
+            if poses:
+                self.quat = poses['orientation']
+                pos = poses['position']
+                rot, _ = self.interpret_rotation(self.quat, self.mode)
+                T = np.eye(4); T[:3, 3] = pos; T[:3, :3] = rot
+                if self.calibrated:
+                    T = self.haply_to_global @ T
+                self.pose = T[:3, 3]
+                self.orient = T[:3, :3]
+
+            # # Gripper smoothing
+            # if self.gripper_counter > 0:
+            #     step = (self.gripper_target - self.gripper_state) / self.gripper_counter
+            #     self.gripper_state += step
+            #     self.gripper_counter -= 1
+
+            time.sleep(0.05) 
+    
+    """
+
+
 
     def _init_plot(self):
         self.fig = plt.figure()
@@ -208,3 +260,7 @@ class HapticVisualizer:
 
     def stop(self):
         self.running = False
+        try:
+            self.reader.stop()
+        except Exception:
+            pass
