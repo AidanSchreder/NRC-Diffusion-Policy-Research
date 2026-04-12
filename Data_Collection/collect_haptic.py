@@ -49,6 +49,7 @@ j_init = np.array([268.77,-76.17,93.10,255.32,-89.55,-5.22]) / 180 * np.pi
 @click.option('--frequency', '-f', default=10, type=float, help="Control frequency in Hz.")
 @click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving command and execution (s).")
 @click.option('--fts_ip', default="192.168.1.11", help="Force-torque sensor IP address.")
+# fts command line options
 @click.option('--fts_port', default=10547, type=int, help="Force-torque sensor UDP port.")
 @click.option('--force_feedback/--no-force_feedback', default=True, help="Enable Haply force feedback using live FTS data.")
 
