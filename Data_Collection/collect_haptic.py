@@ -21,30 +21,24 @@ from Training.real_world.keystroke_counter import (
     KeystrokeCounter, Key, KeyCode
 )
 
-# Starting Robot Position
+# Starting Robot Positions
 
-#lamp task
+#lamp task (OG)
 #j_init = np.array([256.97,-61.94,133.80,109.75,-76.24,-4.66]) / 180 * np.pi
 
-#wiping task
+#wiping task (OG)
 #j_init = np.array([262.85,-87.14,111.61,246.68,-89.5,-10.81]) / 180 * np.pi
 
-#press
+#press (center position)
 j_init = np.array([268.77,-76.17,93.10,255.32,-89.55,-5.22]) / 180 * np.pi
-
-
 
 #new wiping experiment
 #j_init = np.array([282.44,-73.93,86.34,258.27,-89.28,8.64]) / 180 * np.pi
 
-
-
-
-
-#ceneter
+#center (diverse_100 starting position)
 #j_init = np.array([286.23,-79.18,92.93,256.84,-89.22,12.43]) / 180 * np.pi
 
-#simplifeid wiping
+#simplifeid wiping starting position
 #j_init = np.array([284.78,-72.73,101.10,243.87,-89.68,10.07]) / 180 * np.pi
 
 @click.command()
@@ -105,6 +99,7 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
                     t_sample = t_cycle_end - command_latency
                     t_command_time = t_cycle_end + dt
 
+                    # gets obs data from various hardware states & combines all obs keys into a clean obs dictionary
                     obs = env.get_obs()
 
                     if env.start_pose is None:
@@ -147,6 +142,7 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
 
                     precise_wait(t_sample)
 
+                    # get haptic input as incremental motion deltas and gripper open/close command
                     action = viz.get_action(mode='euler', seq='xyz', degrees=False)
                     pos_delta = action[:3]
                     rot_delta = action[3:6]

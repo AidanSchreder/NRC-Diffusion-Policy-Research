@@ -41,6 +41,7 @@ class ForceFilter:
              K_MASTER=3500.0,
              B_MASTER=8.0,
              BLEND_RATE=10.0):
+        # operator deactivated control while the virtual contact wall was active (avoid sudden jump when reactivating)
         if not active and begin_run and self.wall_mode[2]:
             neg_pos = [-v for v in poses["position"]]
             self.cursor_position_offset = neg_pos + self.cursor_position
@@ -122,6 +123,8 @@ class HapticReader:
         if self.haptic_feedback:
             self.force_filter = ForceFilter()
         run_threaded_command(self.connect_and_read)
+    
+        print(f"haptic feedback activated: {self.haptic_feedback}")
 
     def connect_and_read(self):
         first_message = True
@@ -201,9 +204,11 @@ class HapticReader:
                             active,
                             self.begin_run,
                         )
+                        print("raw_force:", raw_force, "filtered_force:", force_vector, "active:", active)
                         fx, fy, fz = force_vector
 
                     self.current_force = {"x": fx, "y": fy, "z": fz}
+                    print("sent_force:", self.current_force)
 
                     request_msg = {
                         "inverse3": [
