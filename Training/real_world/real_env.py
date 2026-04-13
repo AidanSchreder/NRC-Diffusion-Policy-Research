@@ -70,7 +70,7 @@ class ForceTorqueSensor:
         if response_type is not None:
             byte_stream = self.communication_interface.waits_response_bytes()
             if byte_stream is None:
-                self.logger.error("No Response. Timed-out.")
+                raise TimeoutError(f"FTS command {new_command} timed out waiting for a response.")
 
             response = response_type(byte_stream)
             if self.log_force:
@@ -288,7 +288,11 @@ class RealEnv:
         self.ft_timestamp_buffer = deque(maxlen=max(max_obs_buffer_size * 4, n_obs_steps * 8, 64))
         self.ft_lock = threading.Lock()
         self.last_fts_sample_time = None
+        self.ft_consecutive_failures = 0
+        self.ft_failure_raise_after = 3
+        self.ft_stale_timeout = max(0.5, 3.0 / max(float(self.frequency), 1.0))
         if self.enable_force_torque:
+            print("[FTS] Live force-torque enabled.")
             self.ft_sensor = ForceTorqueSensor(
                 fts_ip=fts_ip,
                 fts_port=fts_port,
@@ -426,8 +430,8 @@ class RealEnv:
         robot_obs_raw['start_pose'] = start_pose_arr
 
         if self.ft_sensor is not None:
+            sample_timestamp = float(robot_timestamps[this_idxs[-1]])
             try:
-                sample_timestamp = float(robot_timestamps[this_idxs[-1]])
                 if (
                     self.last_fts_sample_time is None
                     or sample_timestamp > (self.last_fts_sample_time + (0.5 / self.frequency))
@@ -436,8 +440,11 @@ class RealEnv:
                         tcp_pose=robot_obs["robot_eef_pose"][-1],
                         timestamp=sample_timestamp,
                     )
-            except Exception:
-                pass
+                self._check_fts_freshness(sample_timestamp)
+            except Exception as exc:
+                self._handle_fts_failure(exc)
+            else:
+                self._reset_fts_failures()
 
             robot_obs_raw['fts_info'] = self._align_fts_samples(robot_timestamps)
             robot_obs['fts_info'] = robot_obs_raw['fts_info'][this_idxs]
@@ -502,6 +509,34 @@ class RealEnv:
     def get_robot_state(self):
         return self.robot.get_state()
 
+    def _reset_fts_failures(self) -> None:
+        if self.ft_consecutive_failures > 0:
+            print("[FTS] Read recovered.")
+        self.ft_consecutive_failures = 0
+
+    def _handle_fts_failure(self, exc: Exception) -> None:
+        self.ft_consecutive_failures += 1
+        msg = (
+            f"[FTS ERROR] Read failed ({self.ft_consecutive_failures} consecutive): "
+            f"{type(exc).__name__}: {exc}"
+        )
+        print(msg)
+        if self.ft_consecutive_failures >= self.ft_failure_raise_after:
+            raise RuntimeError(
+                f"{msg}. Aborting because force-torque data is stale or unavailable."
+            ) from exc
+
+    def _check_fts_freshness(self, reference_timestamp: float) -> None:
+        if self.last_fts_sample_time is None:
+            raise RuntimeError("No FT sample has been received yet.")
+
+        age = float(reference_timestamp) - float(self.last_fts_sample_time)
+        if age > self.ft_stale_timeout:
+            raise RuntimeError(
+                f"Latest FT sample is stale by {age:.3f}s "
+                f"(limit {self.ft_stale_timeout:.3f}s)."
+            )
+
     def _push_fts_sample(self, fts_info: np.ndarray, timestamp: float) -> None:
         fts_arr = np.asarray(fts_info, dtype=np.float32).reshape(6)
         self.last_fts_info = fts_arr
@@ -542,6 +577,8 @@ class RealEnv:
             ).reshape(-1)
             if ft_vec_raw.shape[0] < 6:
                 raise ValueError(f"Expected 6D FT sample, got shape {ft_vec_raw.shape}")
+            if not np.all(np.isfinite(ft_vec_raw[:6])):
+                raise ValueError(f"Received non-finite FT sample: {ft_vec_raw[:6]}")
 
             force_vec_raw = ft_vec_raw[:3]
             fx, fy, fz = force_vec_raw

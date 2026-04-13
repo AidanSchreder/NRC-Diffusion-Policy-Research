@@ -228,6 +228,13 @@ def main(input, output, robot_ip, match_dataset, match_episode,
 
         print("Warming up policy inference")
         obs = env.get_obs()
+        if expects_fts:
+            if 'fts_info' not in obs:
+                raise RuntimeError("Checkpoint expects fts_info, but RealEnv did not provide it.")
+            ft_sample = np.asarray(obs['fts_info'][-1], dtype=np.float32)
+            if not np.all(np.isfinite(ft_sample)):
+                raise RuntimeError(f"Warmup FT sample is invalid: {ft_sample}")
+            print(f"[FTS] Warmup sample: {ft_sample}")
         base_pose = obs['robot_eef_pose'][-1]
 
         obs_rel = dict(obs)
