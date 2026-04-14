@@ -114,6 +114,7 @@ class RealEnv:
             enable_force_torque=False,
             fts_ip="192.168.1.11",
             fts_port=10547,
+            ft_sensor_owner="env",
             # video capture params
             video_capture_fps=15,
             video_capture_resolution=(640,480),
@@ -282,11 +283,21 @@ class RealEnv:
         # ---------------------------------------------------------------------------------
 
         self.enable_force_torque = enable_force_torque
+        if ft_sensor_owner not in {"env", "haptic"}:
+            raise ValueError(
+                f"Unsupported ft_sensor_owner={ft_sensor_owner!r}. "
+                "Expected 'env' or 'haptic'."
+            )
+        self.ft_sensor_owner = ft_sensor_owner
         self.ft_sensor = None
         self.last_fts_info = np.zeros((6,), dtype=np.float32)
         self.ft_buffer = deque(maxlen=max(max_obs_buffer_size * 4, n_obs_steps * 8, 64))
         self.ft_timestamp_buffer = deque(maxlen=max(max_obs_buffer_size * 4, n_obs_steps * 8, 64))
         self.ft_lock = threading.Lock()
+        self.ft_sample_hz = max(30.0, float(self.frequency) * 3.0)
+        self.ft_sample_period = 1.0 / self.ft_sample_hz
+        self._ft_sampler_stop_event = threading.Event()
+        self._ft_sampler_thread = None
         self.last_fts_sample_time = None
         self.ft_consecutive_failures = 0
         self.ft_failure_raise_after = 3
@@ -312,6 +323,8 @@ class RealEnv:
         self.robot.start(wait=False)
         if self.multi_cam_vis is not None:
             self.multi_cam_vis.start(wait=False)
+        if self.ft_sensor_owner == "env":
+            self._start_ft_sampler()
         if wait:
             self.start_wait()
 
@@ -322,6 +335,8 @@ class RealEnv:
         self.robot.stop(wait=False)
         self.realsense.stop(wait=False)
         self.has_shutdown = True
+        if self.ft_sensor_owner == "env":
+            self._stop_ft_sampler()
         if self.ft_sensor is not None:
             self.ft_sensor.stop()
             self.ft_sensor = None
@@ -431,20 +446,21 @@ class RealEnv:
 
         if self.ft_sensor is not None:
             sample_timestamp = float(robot_timestamps[this_idxs[-1]])
-            try:
-                if (
-                    self.last_fts_sample_time is None
-                    or sample_timestamp > (self.last_fts_sample_time + (0.5 / self.frequency))
-                ):
-                    self.get_fts_observation(
-                        tcp_pose=robot_obs["robot_eef_pose"][-1],
-                        timestamp=sample_timestamp,
-                    )
-                self._check_fts_freshness(sample_timestamp)
-            except Exception as exc:
-                self._handle_fts_failure(exc)
-            else:
-                self._reset_fts_failures()
+            if self.ft_sensor_owner == "env":
+                try:
+                    if (
+                        self.last_fts_sample_time is None
+                        or sample_timestamp > (self.last_fts_sample_time + (0.5 / self.frequency))
+                    ):
+                        self.get_fts_observation(
+                            tcp_pose=robot_obs["robot_eef_pose"][-1],
+                            timestamp=sample_timestamp,
+                        )
+                    self._check_fts_freshness(sample_timestamp)
+                except Exception as exc:
+                    self._handle_fts_failure(exc)
+                else:
+                    self._reset_fts_failures()
 
             robot_obs_raw['fts_info'] = self._align_fts_samples(robot_timestamps)
             robot_obs['fts_info'] = robot_obs_raw['fts_info'][this_idxs]
@@ -544,6 +560,44 @@ class RealEnv:
         self.last_fts_sample_time = float(timestamp)
         self.ft_timestamp_buffer.append(self.last_fts_sample_time)
 
+    def _start_ft_sampler(self) -> None:
+        if self.ft_sensor is None or self._ft_sampler_thread is not None:
+            return
+
+        self._ft_sampler_stop_event.clear()
+        self._ft_sampler_thread = threading.Thread(
+            target=self._ft_sampler_loop,
+            name="ft-sampler",
+            daemon=True,
+        )
+        self._ft_sampler_thread.start()
+
+    def _stop_ft_sampler(self) -> None:
+        thread = self._ft_sampler_thread
+        if thread is None:
+            return
+
+        self._ft_sampler_stop_event.set()
+        thread.join(timeout=2.0)
+        self._ft_sampler_thread = None
+        self._ft_sampler_stop_event.clear()
+
+    def _ft_sampler_loop(self) -> None:
+        while not self._ft_sampler_stop_event.is_set():
+            if self.has_shutdown or self.ft_sensor is None:
+                break
+            if not self.is_ready:
+                time.sleep(min(0.05, self.ft_sample_period))
+                continue
+            try:
+                self.get_fts_observation()
+            except Exception:
+                # get_obs() already has freshness handling; the sampler just keeps
+                # the buffer warm during long inference chunks.
+                time.sleep(min(0.05, self.ft_sample_period))
+                continue
+            time.sleep(self.ft_sample_period)
+
     def _align_fts_samples(self, target_timestamps: np.ndarray) -> np.ndarray:
         target_timestamps = np.asarray(target_timestamps, dtype=np.float64).reshape(-1)
         if len(target_timestamps) == 0:
@@ -561,6 +615,18 @@ class RealEnv:
                 idx = 0
             aligned[i] = ft_values[idx]
         return aligned
+
+    def get_latest_fts_observation(self) -> np.ndarray:
+        """
+        Return the most recently transformed FT sample without issuing a new
+        sensor command.
+
+        When ft_sensor_owner == "env", this is populated by get_obs() and the
+        background sampler. When ft_sensor_owner == "haptic", it is updated by
+        the Haply feedback loop's live FT reads.
+        """
+        with self.ft_lock:
+            return self.last_fts_info.copy()
 
     def get_fts_observation(self, tcp_pose: Optional[np.ndarray]=None,
                             timestamp: Optional[float]=None) -> np.ndarray:

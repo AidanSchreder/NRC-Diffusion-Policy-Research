@@ -20,7 +20,7 @@ class ForceFilter:
         self.scale = scale
 
         self.ema = None
-        self.last_out = [0.0, 0.0, 0.0]
+        self.last_out = np.zeros(3, dtype=np.float32)
         self.last_t = None
 
         self.wall_mode = [False, False, False]
@@ -103,9 +103,12 @@ class ForceFilter:
             self.wall_blend = max(target_blend, self.wall_blend - blend_step)
 
         f_output = (1.0 - self.wall_blend) * out + self.wall_blend * f_wall
-        out = [float(o) * self.scale for o in f_output]
-        self.last_out = out
-        return out
+        # Keep the limiter state in unscaled Newtons. Storing the scaled output
+        # here causes the limiter to collapse the force toward zero and prevents
+        # the wall-mode entry threshold from ever being reached at normal update
+        # rates.
+        self.last_out = np.asarray(f_output, dtype=np.float32)
+        return [float(o) * self.scale for o in f_output]
 
 class HapticReader:
     def __init__(self, uri='ws://localhost:10001', force=None,
@@ -125,6 +128,33 @@ class HapticReader:
         run_threaded_command(self.connect_and_read)
     
         print(f"haptic feedback activated: {self.haptic_feedback}")
+
+    def _get_force_sample(self):
+        if self.force_reader is None:
+            return np.zeros(3, dtype=np.float32)
+
+        sample = None
+        ft_sensor_owner = getattr(self.force_reader, "ft_sensor_owner", None)
+        get_live_sample = getattr(self.force_reader, "get_fts_observation", None)
+        get_latest_sample = getattr(self.force_reader, "get_latest_fts_observation", None)
+
+        # The working teleop pipeline let the Haply loop own FT reads directly.
+        # Preserve that behavior when the environment is configured for haptic-owned
+        # FT acquisition.
+        if ft_sensor_owner == "haptic" and callable(get_live_sample):
+            sample = get_live_sample()
+        elif callable(get_latest_sample):
+            sample = get_latest_sample()
+        elif callable(get_live_sample):
+            sample = get_live_sample()
+
+        if sample is None:
+            return np.zeros(3, dtype=np.float32)
+
+        sample = np.asarray(sample, dtype=np.float32).reshape(-1)
+        if sample.shape[0] < 3 or not np.all(np.isfinite(sample[:3])):
+            return np.zeros(3, dtype=np.float32)
+        return sample[:3]
 
     def connect_and_read(self):
         first_message = True
@@ -197,18 +227,20 @@ class HapticReader:
                         if not self.begin_run and active:
                             self.begin_run = True
 
-                        raw_force = self.force_reader.get_fts_observation()[:3]
+                        # Pull the current FT sample using the ownership mode
+                        # configured by the environment.
+                        raw_force = self._get_force_sample()
                         force_vector = self.force_filter.feed(
                             raw_force,
                             self.poses,
                             active,
                             self.begin_run,
                         )
-                        print("raw_force:", raw_force, "filtered_force:", force_vector, "active:", active)
+                        #print("raw_force:", raw_force, "filtered_force:", force_vector, "active:", active)
                         fx, fy, fz = force_vector
 
-                    self.current_force = {"x": fx, "y": fy, "z": fz}
-                    print("sent_force:", self.current_force)
+                    self.current_force = {"x": 0, "y": 0, "z": fz}
+                    #print("sent_force:", self.current_force)
 
                     request_msg = {
                         "inverse3": [

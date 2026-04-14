@@ -1,4 +1,4 @@
-# python collect_haptic.py -o /home/demoaccount/Data/demoaccount2/Fall_2025/NRC_Diffusion_Policy_2.0/Data_Collection/Collected_Data/press_2
+# python collect_haptic.py -o /home/demoaccount/Data/demoaccount2/Fall_2025/NRC_Diffusion_Policy_2.0/Data_Collection/Collected_Data/wb_feedback
 
 """
 check camera connection:
@@ -29,8 +29,11 @@ from Training.real_world.keystroke_counter import (
 #wiping task (OG)
 #j_init = np.array([262.85,-87.14,111.61,246.68,-89.5,-10.81]) / 180 * np.pi
 
+#whitebard
+j_init = np.array([280.76,-64.18,98.11,237.59,-89.50,5.90]) / 180 * np.pi
+
 #press (center position)
-j_init = np.array([268.77,-76.17,93.10,255.32,-89.55,-5.22]) / 180 * np.pi
+#j_init = np.array([268.77,-76.17,93.10,255.32,-89.55,-5.22]) / 180 * np.pi
 
 #new wiping experiment
 #j_init = np.array([282.44,-73.93,86.34,258.27,-89.28,8.64]) / 180 * np.pi
@@ -69,6 +72,7 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
                 enable_force_torque=True,
                 fts_ip=fts_ip,
                 fts_port=fts_port,
+                ft_sensor_owner="haptic" if force_feedback else "env",
                 enable_multi_cam_vis=True,
                 record_raw_video=True,
                 thread_per_video=3,

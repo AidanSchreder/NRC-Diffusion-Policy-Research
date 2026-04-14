@@ -1,0 +1,419 @@
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from misc.subprocess_utils import run_threaded_command
+import math
+import numpy as np
+import threading
+import time
+import orjson
+from websockets.sync.client import connect  # Requires websockets >= 12
+
+class AdaptiveSafetyScaler:
+    def __init__(self,
+                 min_force=4.0,
+                 full_force=8.0,
+                 min_speed=0.02,
+                 full_speed=0.08,
+                 power_trigger=0.08,
+                 power_full=0.35,
+                 instability_rise_hz=18.0,
+                 instability_fall_hz=3.0,
+                 attenuation_hz=35.0,
+                 recovery_hz=0.7,
+                 min_scalar=0.15,
+                 max_force_norm=9.0,
+                 axis_force_cap=(7.5, 7.5, 8.5)):
+        self.min_force = float(min_force)
+        self.full_force = float(full_force)
+        self.min_speed = float(min_speed)
+        self.full_speed = float(full_speed)
+        self.power_trigger = float(power_trigger)
+        self.power_full = float(power_full)
+        self.instability_rise_hz = float(instability_rise_hz)
+        self.instability_fall_hz = float(instability_fall_hz)
+        self.attenuation_hz = float(attenuation_hz)
+        self.recovery_hz = float(recovery_hz)
+        self.min_scalar = float(min_scalar)
+        self.max_force_norm = float(max_force_norm)
+        self.axis_force_cap = np.asarray(axis_force_cap, dtype=np.float32)
+
+        self.scalar = 1.0
+        self.instability = 0.0
+        self.last_position = None
+
+    @staticmethod
+    def _clip01(value):
+        return max(0.0, min(1.0, float(value)))
+
+    def limit(self, force_cmd, position, velocity, active, dt):
+        force_cmd = np.asarray(force_cmd, dtype=np.float32)
+        position = np.asarray(position, dtype=np.float32)
+        velocity = np.asarray(velocity, dtype=np.float32)
+        force_cmd = np.where(np.isfinite(force_cmd), force_cmd, 0.0)
+        position = np.where(np.isfinite(position), position, 0.0)
+        velocity = np.where(np.isfinite(velocity), velocity, 0.0)
+
+        if dt <= 0 or not np.isfinite(dt):
+            dt = 1.0 / 100.0
+
+        derived_velocity = np.zeros(3, dtype=np.float32)
+        if self.last_position is not None:
+            derived_velocity = (position - self.last_position) / dt
+        self.last_position = position.copy()
+
+        if np.all(np.isfinite(velocity)):
+            motion_velocity = 0.5 * velocity + 0.5 * derived_velocity
+        else:
+            motion_velocity = derived_velocity
+
+        force_mag = float(np.linalg.norm(force_cmd))
+        speed = float(np.linalg.norm(motion_velocity))
+        positive_power = float(max(0.0, np.dot(force_cmd, motion_velocity)))
+
+        if force_mag > 1e-6 and speed > 1e-6:
+            alignment = float(max(0.0, np.dot(force_cmd, motion_velocity) / (force_mag * speed)))
+        else:
+            alignment = 0.0
+
+        force_gate = self._clip01((force_mag - self.min_force) / max(1e-6, self.full_force - self.min_force))
+        speed_gate = self._clip01((speed - self.min_speed) / max(1e-6, self.full_speed - self.min_speed))
+        power_gate = self._clip01((positive_power - self.power_trigger) / max(1e-6, self.power_full - self.power_trigger))
+        instability_target = max(power_gate, alignment * force_gate * speed_gate)
+
+        instability_rate = self.instability_rise_hz if instability_target > self.instability else self.instability_fall_hz
+        instability_alpha = self._clip01(instability_rate * dt)
+        self.instability += (instability_target - self.instability) * instability_alpha
+
+        target_scalar = 1.0 - self.instability * (1.0 - self.min_scalar)
+        scalar_rate = self.attenuation_hz if target_scalar < self.scalar else self.recovery_hz
+        scalar_alpha = self._clip01(scalar_rate * dt)
+        self.scalar += (target_scalar - self.scalar) * scalar_alpha
+        self.scalar = float(np.clip(self.scalar, self.min_scalar, 1.0))
+
+        safe_force = force_cmd * self.scalar
+        safe_force = np.clip(safe_force, -self.axis_force_cap, self.axis_force_cap)
+
+        safe_norm = float(np.linalg.norm(safe_force))
+        if safe_norm > self.max_force_norm > 0.0:
+            safe_force *= self.max_force_norm / safe_norm
+
+        return safe_force.astype(np.float32)
+
+class ForceFilter:
+    def __init__(self,
+                 lowpass_fc=23,
+                 max_rate=15.0,
+                 scale=0.28):
+        self.lowpass_fc = lowpass_fc
+        self.max_rate = max_rate
+        self.scale = scale
+
+        self.ema = None
+        self.last_out = np.zeros(3, dtype=np.float32)
+        self.last_t = None
+
+        self.wall_mode = [False, False, False]
+        self.wall_position = np.zeros(3)
+        self.cursor_position = np.zeros(3)
+        self.cursor_position_offset = np.zeros(3)
+        self.wall_blend = 0.0
+        self.safety_scaler = AdaptiveSafetyScaler()
+        self.wall_hold_force = 0.0
+        self.wall_peak_penetration = 0.0
+
+    def _reset_wall_state(self, axis):
+        self.wall_mode[axis] = False
+        self.wall_blend = 0.0
+        self.cursor_position_offset[axis] = 0.0
+        self.wall_hold_force = 0.0
+        self.wall_peak_penetration = 0.0
+
+    def alpha(self, dt):
+        if self.lowpass_fc <= 0 or dt <= 0:
+            return 1.0
+        rc = 1.0 / (2.0 * math.pi * self.lowpass_fc)
+        return dt / (rc + dt)
+
+    def feed(self, raw_ft, poses, active, begin_run,
+             F_ENTER=8.0,
+             F_EXIT=5.0,
+             K_MASTER=3500.0,
+             B_MASTER=8.0,
+             BLEND_RATE=10.0,
+             PENETRATION_DEADBAND=0.0004,
+             RELEASE_PENETRATION=0.0007,
+             HOLD_DECAY_HZ=6.0,
+             MAX_CONTACT_FORCE=18.0):
+        # operator deactivated control while the virtual contact wall was active (avoid sudden jump when reactivating)
+        if not active and begin_run and self.wall_mode[2]:
+            neg_pos = -np.asarray(poses["position"], dtype=np.float32)
+            self.cursor_position_offset = neg_pos + self.cursor_position
+            return [0.0, 0.0, 0.0]
+
+        now = time.time()
+        fx, fy, fz = raw_ft
+
+        if self.last_t is None:
+            dt = 1.0 / 100.0
+        else:
+            dt = now - self.last_t
+            if dt <= 0 or dt > 1.0:
+                dt = 1.0 / 100.0
+        self.last_t = now
+
+        a = self.alpha(dt)
+        if self.ema is None:
+            self.ema = np.array([fx, fy, fz], dtype=np.float32)
+        else:
+            self.ema = np.array([
+                a * fx + (1 - a) * self.ema[0],
+                a * fy + (1 - a) * self.ema[1],
+                a * fz + (1 - a) * self.ema[2],
+            ], dtype=np.float32)
+
+        out = self.ema
+        max_step = self.max_rate * dt
+        out = np.array([
+            self.last_out[i] + max(-max_step, min(out[i] - self.last_out[i], max_step))
+            for i in range(3)
+        ], dtype=np.float32)
+
+        f_wall = out.copy()
+        pos = np.array(poses["position"], dtype=np.float32)
+        vel = np.array(poses["velocity"], dtype=np.float32)
+        self.cursor_position = pos
+
+        if not self.wall_mode[2] and out[2] > F_ENTER and raw_ft[2] > F_ENTER:
+            self.wall_mode[2] = True
+            estimated_penetration = -(out[2] / K_MASTER)
+            self.wall_position = pos[2] - estimated_penetration
+            self.wall_hold_force = max(float(out[2]), float(raw_ft[2]), 0.0)
+            self.wall_peak_penetration = max(0.0, -estimated_penetration)
+        elif self.wall_mode[2]:
+            d_raw = -(pos[2] + self.cursor_position_offset[2] - self.wall_position)
+            penetration = max(0.0, d_raw - PENETRATION_DEADBAND)
+            contact_force_low = (out[2] < F_EXIT and raw_ft[2] < F_EXIT) or (raw_ft[2] < 0.5)
+            if contact_force_low and penetration < RELEASE_PENETRATION:
+                self._reset_wall_state(2)
+
+        if self.wall_mode[2]:
+            d = -(pos[2] + self.cursor_position_offset[2] - self.wall_position)
+            penetration = max(0.0, d - PENETRATION_DEADBAND)
+            v_n = max(0.0, -vel[2])
+            spring_force = K_MASTER * penetration + B_MASTER * v_n if penetration > 0 else 0.0
+            measured_force = max(float(out[2]), float(raw_ft[2]), 0.0)
+
+            # Preserve compression feedback on compliant objects even if the
+            # measured contact force relaxes while the tool keeps moving in.
+            if penetration >= self.wall_peak_penetration:
+                self.wall_peak_penetration = penetration
+                self.wall_hold_force = max(self.wall_hold_force, spring_force, measured_force)
+            else:
+                decay_alpha = min(1.0, HOLD_DECAY_HZ * dt)
+                target_force = max(spring_force, measured_force)
+                self.wall_hold_force += (target_force - self.wall_hold_force) * decay_alpha
+                self.wall_hold_force = max(self.wall_hold_force, target_force)
+
+            self.wall_hold_force = min(self.wall_hold_force, MAX_CONTACT_FORCE)
+            f_wall[2] = self.wall_hold_force
+
+        target_blend = 1.0 if self.wall_mode[2] else 0.0
+        blend_step = BLEND_RATE * dt
+        if self.wall_blend < target_blend:
+            self.wall_blend = min(target_blend, self.wall_blend + blend_step)
+        elif self.wall_blend > target_blend:
+            self.wall_blend = max(target_blend, self.wall_blend - blend_step)
+
+        f_output = (1.0 - self.wall_blend) * out + self.wall_blend * f_wall
+        # If the pen starts moving with the commanded force, aggressively scale
+        # the command down to prevent the device from driving the operator.
+        f_output = self.safety_scaler.limit(
+            force_cmd=f_output,
+            position=pos,
+            velocity=vel,
+            active=active,
+            dt=dt,
+        )
+
+        # Keep the limiter state in unscaled Newtons after safety limiting.
+        # Storing the scaled device command here causes the limiter to collapse
+        # the force toward zero and prevents wall-mode entry at normal update
+        # rates.
+        self.last_out = np.asarray(f_output, dtype=np.float32)
+        return [float(o) * self.scale for o in f_output]
+
+class HapticReader:
+    def __init__(self, uri='ws://localhost:10001', force=None,
+                 haptic_feedback=False, force_reader=None):
+        self.uri = uri
+        self.force = force or {"x": 0.0, "y": 0.0, "z": 0.0}
+        self.force_reader = force_reader
+        self.poses = {}
+        self.buttons = {}
+        self.running = True
+        self._lock = threading.Lock()
+        self.haptic_feedback = haptic_feedback
+        self.current_force = self.force.copy()
+        self.begin_run = False
+        if self.haptic_feedback:
+            self.force_filter = ForceFilter()
+        run_threaded_command(self.connect_and_read)
+    
+        print(f"haptic feedback activated: {self.haptic_feedback}")
+
+    def _get_force_sample(self):
+        if self.force_reader is None:
+            return np.zeros(3, dtype=np.float32)
+
+        sample = None
+        ft_sensor_owner = getattr(self.force_reader, "ft_sensor_owner", None)
+        get_live_sample = getattr(self.force_reader, "get_fts_observation", None)
+        get_latest_sample = getattr(self.force_reader, "get_latest_fts_observation", None)
+
+        # The working teleop pipeline let the Haply loop own FT reads directly.
+        # Preserve that behavior when the environment is configured for haptic-owned
+        # FT acquisition.
+        if ft_sensor_owner == "haptic" and callable(get_live_sample):
+            sample = get_live_sample()
+        elif callable(get_latest_sample):
+            sample = get_latest_sample()
+        elif callable(get_live_sample):
+            sample = get_live_sample()
+
+        if sample is None:
+            return np.zeros(3, dtype=np.float32)
+
+        sample = np.asarray(sample, dtype=np.float32).reshape(-1)
+        if sample.shape[0] < 3 or not np.all(np.isfinite(sample[:3])):
+            return np.zeros(3, dtype=np.float32)
+        return sample[:3]
+
+    def connect_and_read(self):
+        first_message = True
+        inverse3_device_id = None
+
+        try:
+            with connect(self.uri) as ws:
+                active = False
+                prev_button_a = False
+                while self.running:
+                    response = ws.recv()
+                    data = orjson.loads(response)
+                    inverse3_devices = data.get("inverse3", [])
+                    verse_grip_devices = data.get("wireless_verse_grip", [])
+
+                    inverse3_data = inverse3_devices[0] if inverse3_devices else {}
+                    verse_grip_data = verse_grip_devices[0] if verse_grip_devices else {}
+
+                    if first_message:
+                        first_message = False
+                        if not inverse3_data:
+                            print("No Inverse3 device found.")
+                            break
+                        if not verse_grip_data:
+                            print("No Wireless Verse Grip device found.")
+                        inverse3_device_id = inverse3_data.get("device_id")
+                        handedness = inverse3_data.get("config", {}).get("handedness")
+                        print(f"Inverse3 device ID: {inverse3_device_id}, Handedness: {handedness}")
+
+                    position_raw = inverse3_data["state"].get("cursor_position", {})
+                    velocity_raw = inverse3_data["state"].get("cursor_velocity", {})
+                    buttons = verse_grip_data.get("state", {}).get("buttons", {})
+                    orientation_raw = verse_grip_data.get("state", {}).get("orientation", {})
+
+                    position = [
+                        position_raw.get("x", 0.0),
+                        position_raw.get("y", 0.0),
+                        position_raw.get("z", 0.0)
+                    ]
+                    orientation = [
+                        orientation_raw.get("x", 0.0),
+                        orientation_raw.get("y", 0.0),
+                        orientation_raw.get("z", 0.0),
+                        orientation_raw.get("w", 1.0)
+                    ]
+                    velocity = [
+                        velocity_raw.get("x", 0.0),
+                        velocity_raw.get("y", 0.0),
+                        velocity_raw.get("z", 0.0)
+                    ]
+
+                    with self._lock:
+                        self.poses = {
+                            "position": position,
+                            "velocity": velocity,
+                            "orientation": orientation
+                        }
+                        self.buttons = buttons
+
+                    fx, fy, fz = 0.0, 0.0, 0.0
+                    if self.haptic_feedback and self.force_reader is not None:
+                        if getattr(self.force_reader, "has_shutdown", False):
+                            return
+
+                        a_pressed = bool(buttons.get("a", False))
+                        if a_pressed and not prev_button_a:
+                            active = not active
+                        prev_button_a = a_pressed
+
+                        if not self.begin_run and active:
+                            self.begin_run = True
+
+                        # Pull the current FT sample using the ownership mode
+                        # configured by the environment.
+                        raw_force = self._get_force_sample()
+                        force_vector = self.force_filter.feed(
+                            raw_force,
+                            self.poses,
+                            active,
+                            self.begin_run,
+                        )
+                        #print("raw_force:", raw_force, "filtered_force:", force_vector, "active:", active)
+                        fx, fy, fz = force_vector
+
+                    #self.current_force = {"x": fx, "y": fy, "z": fz}
+                    self.current_force = {"x": 0, "y": 0, "z": fz}
+                    #print("sent_force:", self.current_force)
+
+                    request_msg = {
+                        "inverse3": [
+                            {
+                                "device_id": inverse3_device_id,
+                                "commands": {
+                                    "set_cursor_force": {
+                                        "values": self.current_force
+                                    }
+                                }
+                            }
+                        ]
+                    }
+
+                    ws.send(orjson.dumps(request_msg))
+
+        except Exception as e:
+            print(f"WebSocket connection error: {e}")
+
+    def stop(self):
+        self.running = False
+
+    def get_device_state(self):
+        with self._lock:
+            return self.poses, self.buttons
+
+def main():
+    haptic_reader = HapticReader()
+    # Start the threaded WebSocket reader
+    try:
+        while haptic_reader.running:
+            poses, buttons = haptic_reader.get_device_state()
+            print("Poses:", poses)
+            print("Buttons:", buttons)
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        print("Stopping...")
+        haptic_reader.stop()
+
+if __name__ == '__main__':
+    main()
